@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Gradio runtime cache
+.gradio/
+
+# Local working / generated artifacts (models, exports, logs, ad-hoc scripts)
+.work/
+
+# OS
+.DS_Store
+Thumbs.db

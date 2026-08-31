@@ -1,0 +1,44 @@
+{
+  "validation_rules": [
+    {
+      "name": "R1 Attribute Completeness",
+      "description": "Model elements without identity or compliance-critical properties are not yet model elements.",
+      "entity": ["IfcWall", "IfcDoor"],
+      "file_format": [".ifc"],
+      "checks": [
+        {
+          "name": "R1a Name present",
+          "description": "Element must carry a non-empty Name (direct attribute).",
+          "attribute": "Name",
+          "condition": { "type": "non_empty" }
+        },
+        {
+          "name": "R1b FireRating present",
+          "description": "Non-empty FireRating found in ANY attached property set (standard or vendor).",
+          "attribute": "FireRating",
+          "condition": { "type": "non_empty", "source": "pset_any", "severity": "warn" }
+        }
+      ]
+    },
+    {
+      "name": "R2 Exit Door Width",
+      "description": "Doors that must allow passage must actually be wide enough (nominal width as a documented proxy for clear width).",
+      "entity": ["IfcDoor"],
+      "file_format": [".ifc"],
+      "checks": [
+        {
+          "name": "R2 Door width",
+          "description": "IfcDoor.OverallWidth must be >= threshold.",
+          "attribute": "OverallWidth",
+          "condition": {
+            "type": "range",
+            "min": 0.9,
+            "unit": "m",
+            "missing": "warn",
+            "threshold_basis": "GB50016 (疏散门净宽 >= 0.9 m) / IBC 813 mm"
+          }
+        }
+      ]
+    }
+  ]
+}
