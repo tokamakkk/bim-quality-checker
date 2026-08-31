@@ -27,11 +27,9 @@ from dotenv import load_dotenv
 
 import gradio as gr
 
-# 项目根目录的 .env（DEEPSEEK_API_KEY 等）；相对本文件定位，与启动目录无关
-load_dotenv(SRC_DIR.parent / ".env")
-
 import agent  # DESIGN.md §6：LLM Agent 集成点（问答 + 修复工具）
 from core.engine import load_rules, run_checks
+from core.ifc_utils import extract_components
 from core.verdict import Verdict, VerdictStatus
 from report.report_html import generate_report
 from viz.mesh_exporter import export_colored_glb
@@ -75,6 +73,81 @@ CSS = """
   box-shadow: 0 8px 28px rgba(0, 0, 0, .18);
   padding: 10px 12px;
 }
+/* 构件卡片列表（中间列底部）：搜索框 + 折叠卡片。
+   展开/收起与搜索过滤全部由内联 JS 完成，无后端往返。 */
+#component-cards {
+  max-height: 300px;   /* 高度固定，内容超出时列表内滚动 */
+  overflow-y: auto;
+  border: 1px solid var(--border-color-primary, #e5e7eb);
+  border-radius: 10px;
+  padding: 8px;
+  background: var(--block-background-fill, #ffffff);
+  margin-top: 10px;
+}
+.cc-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: var(--body-text-color, #1f2937);
+  border: 1px solid var(--border-color-primary, #d1d5db);
+  border-radius: 8px;
+  outline: none;
+}
+.cc-search:focus { border-color: #22c55e; }
+.cc-search::placeholder { color: #6b7280; }  /* 占位提示比正文浅一级，避免默认浅灰看不清 */
+/* 卡片底色与右侧结果卡片一致（#f9fafb），文字全部显式取主题深色，
+   避免 gr.HTML 的 prose 样式把继承色冲淡 */
+.cc-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  background: #f9fafb;
+}
+.cc-card:last-child { margin-bottom: 0; }
+.cc-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.cc-header:hover { background: #f3f4f6; }
+.cc-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--body-text-color, #1f2937);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-type {
+  font-size: 12px;
+  color: #374151;
+  background: #e5e7eb;
+  border-radius: 10px;
+  padding: 1px 8px;
+  flex-shrink: 0;
+}
+.cc-arrow { color: #4b5563; transition: transform .2s ease; flex-shrink: 0; }
+.cc-card.open .cc-arrow { transform: rotate(90deg); }
+/* 展开动画：max-height 过渡（0 → 上限），内容超高时内部滚动 */
+.cc-body { max-height: 0; overflow: hidden; transition: max-height .25s ease; }
+.cc-card.open .cc-body { max-height: 480px; overflow-y: auto; }
+.cc-row {
+  display: flex;
+  gap: 10px;
+  padding: 3px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  border-top: 1px solid #e5e7eb;
+}
+.cc-key { color: #4b5563; flex: 0 0 42%; word-break: break-word; }
+.cc-val { color: var(--body-text-color, #111827); flex: 1; word-break: break-all; }
 """
 
 
@@ -109,7 +182,7 @@ def _results_html(verdicts: list, check_ids: set, title: str) -> str:
         rows.append(
             f'<div style="padding:5px 8px;border-left:3px solid {color[v.status]};'
             f'background:#f9fafb;border-radius:4px;margin:3px 0;font-size:13px">'
-            f'{_EMOJI[v.status]} <b>{esc(v.element_name) or "（未命名）"}</b>'
+            f'{_EMOJI[v.status]} <b style="color:#1f2937">{esc(v.element_name) or "（未命名）"}</b>'
             f'<span style="color:#6b7280"> · {esc(v.ifc_type)} · {esc(v.check_id)}</span><br>'
             f'<span style="color:#4b5563">{esc(v.reason)}</span>'
             f'<span style="color:#9ca3af;font-size:12px">（当前 {esc(v.current_value)}，期望 {esc(v.expected)}）</span>'
@@ -137,6 +210,56 @@ def _model_info_md(path: str) -> str:
     )
 
 
+def _component_cards_html(components: list) -> str:
+    """构件卡片列表：搜索框 + 折叠卡片（点击展开全部属性）。
+
+    纯前端交互（展开/收起、按名称即时过滤），无需后端往返：
+    - 展开/收起：onclick 切换 .open 类，CSS max-height 过渡平滑动画
+    - 搜索：oninput 按卡片 data-name 即时过滤
+    卡片不展示任何检查状态 / 违规标记 / 颜色指示（需求限定）。
+    注意：gr.HTML 用 innerHTML 渲染，<script> 不会执行，
+    因此交互全部写为内联事件处理器。
+    """
+    if not components:
+        return '<div style="color:#9ca3af;font-size:14px">（暂无构件卡片，请先运行检查）</div>'
+    esc = html.escape
+    # 文字颜色全部内联（与右侧结果卡片 _results_html 同一机制）：
+    # gr.HTML 容器带 Tailwind prose 样式，外部 CSS 类的继承色可能被其覆盖，
+    # 内联 style 优先级最高，保证显示一致（名称加粗深色 / 类型与次要信息 #6b7280）。
+    cards = []
+    for c in components:
+        # 属性键值列表，首行为 GlobalId（单独携带，不在直接属性里重复）
+        rows = [
+            '<div class="cc-row"><span class="cc-key" style="color:#6b7280">GlobalId</span>'
+            f'<span class="cc-val" style="color:#1f2937">{esc(c["guid"])}</span></div>'
+        ]
+        for key, value in c["props"]:
+            rows.append(
+                f'<div class="cc-row"><span class="cc-key" style="color:#6b7280">{esc(key)}</span>'
+                f'<span class="cc-val" style="color:#1f2937">{esc(value)}</span></div>'
+            )
+        cards.append(
+            f'<div class="cc-card" data-name="{esc(c["name"].lower())}">'
+            f'<div class="cc-header" onclick="this.parentElement.classList.toggle(\'open\')">'
+            f'<span class="cc-name" style="color:#1f2937;font-weight:600">{esc(c["name"])}</span>'
+            f'<span class="cc-type" style="color:#6b7280">{esc(c["ifc_type"])}</span>'
+            f'<span class="cc-arrow" style="color:#6b7280">▸</span>'
+            f'</div><div class="cc-body">{"".join(rows)}</div></div>'
+        )
+    search_js = (
+        "var q=this.value.trim().toLowerCase(),"
+        "cs=document.getElementById('component-cards');"
+        "cs.querySelectorAll('.cc-card').forEach(function(c){"
+        "c.style.display=(!q||c.dataset.name.indexOf(q)>=0)?'':'none';});"
+    )
+    search = (
+        '<input class="cc-search" type="text" placeholder="搜索构件名称…" '
+        'style="color:#1f2937" '
+        f'oninput="{search_js}">'
+    )
+    return f'<div id="component-cards">{search}{"".join(cards)}</div>'
+
+
 # ---------------------------------------------------------------------------
 # 事件处理
 # ---------------------------------------------------------------------------
@@ -153,23 +276,24 @@ def on_upload_ifc(file_obj):
     """上传 IFC：保存工作副本，返回（路径, 模型信息）。"""
     src = _to_path(file_obj)
     if src is None or not src.exists():
-        return None, "请上传 .ifc 模型文件（也可使用 sample_data/ 下的示例）", None
+        return None, "请上传 .ifc 模型文件（也可使用 sample_data/ 下的示例）", None, None
     WORK_DIR.mkdir(exist_ok=True)
     dst = WORK_DIR / f"model_{time.strftime('%H%M%S')}_{src.name}"
     shutil.copy2(src, dst)
-    # 第三个返回值：清除待确认的修复方案（新模型下旧方案无效）
-    return str(dst), _model_info_md(str(dst)), None
+    # 第三个返回值：清除待确认的修复方案（新模型下旧方案无效）；
+    # 第四个：清空构件卡片（新模型未检查，旧卡片无效）
+    return str(dst), _model_info_md(str(dst)), None, _component_cards_html([])
 
 
 def run_check(model_path, rules_file, progress=gr.Progress()):
     """点击「运行检查」：规则加载 → 引擎检查 → 着色 GLB → 更新各面板。
 
-    返回：(verdicts, 摘要, R1 列表, R2 列表, GLB 路径, pending)
+    返回：(verdicts, 摘要, R1 列表, R2 列表, GLB 路径, pending, 卡片 HTML)
     末位 pending 恒为 None：新检查结果后旧待确认方案不再有效。
     """
     if not model_path:
         gr.Warning("请先上传 IFC 模型文件")
-        return [], "", "", "", None, None
+        return [], "", "", "", None, None, None
 
     # 规则配置：优先用上传的，否则默认 config/rules.json
     rules_path = _to_path(rules_file)
@@ -190,6 +314,16 @@ def run_check(model_path, rules_file, progress=gr.Progress()):
     except ValueError as e:
         raise gr.Error(f"3D 模型生成失败：{e}") from e
 
+    # 构件卡片：提取全部被检查构件（IfcWall / IfcDoor）及其全部属性；
+    # 提取失败不影响检查主流程（卡片显示占位）
+    import ifcopenshell
+    try:
+        components = extract_components(ifcopenshell.open(model_path))
+        cards_html = _component_cards_html(components)
+    except Exception as e:
+        print(f"[app] 构件卡片提取失败: {e}")
+        cards_html = _component_cards_html([])
+
     progress(1.0, desc="完成")
     return (
         verdicts,
@@ -198,6 +332,7 @@ def run_check(model_path, rules_file, progress=gr.Progress()):
         _results_html(verdicts, {"R2"}, "R2 门宽度"),
         glb_path,
         None,
+        cards_html,
     )
 
 
@@ -266,7 +401,7 @@ def chat_respond(message, history, verdicts, model_path, rules_file, pending):
     # 不含 = 保持现值（无关问答不误清待确认方案）
     new_pending = result["pending"] if "pending" in result else pending
 
-    # 修复 / 重检发生了 → 刷新 3D 与右侧面板
+    # 修复 / 重检发生了 → 刷新 3D、右侧面板与构件卡片
     if result.get("verdicts") and result.get("model_path"):
         new_model = result["model_path"]
         new_verdicts = result["verdicts"]
@@ -276,17 +411,25 @@ def chat_respond(message, history, verdicts, model_path, rules_file, pending):
             )
         except ValueError as e:
             raise gr.Error(f"修复后 3D 模型生成失败：{e}") from e
+        import ifcopenshell
+        try:
+            components = extract_components(ifcopenshell.open(new_model))
+            cards_html = _component_cards_html(components)
+        except Exception as e:
+            print(f"[app] 修复后构件卡片提取失败: {e}")
+            cards_html = _component_cards_html([])
         return (
             new_history, new_model, new_verdicts,
             _summary_html(new_verdicts),
             _results_html(new_verdicts, {"R1a", "R1b"}, "R1 属性完整性"),
             _results_html(new_verdicts, {"R2"}, "R2 门宽度"),
             glb,
+            cards_html,
             new_pending,
         )
     # 普通问答：面板保持不变
     return (new_history, model_path, verdicts,
-            gr.update(), gr.update(), gr.update(), gr.update(), new_pending)
+            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), new_pending)
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +482,9 @@ with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS) as 
                 f"<span style='color:{WARN_HEX}'>■ 警告（数据缺失）</span> &nbsp; "
                 f"<span style='color:{FAIL_HEX}'>■ 违规</span>",
             )
+            # 构件卡片列表：运行检查后填充全部被检查构件（IfcWall/IfcDoor）。
+            # 搜索 / 展开收起为纯前端交互（内联 JS），无后端往返。
+            component_cards = gr.HTML(_component_cards_html([]))
 
         # ------------------------------------------------ 右栏：检查结果
         with gr.Column(scale=3, min_width=320, elem_id="results-column"):
@@ -360,7 +506,7 @@ with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS) as 
         with chat_body:
             chatbot = gr.Chatbot(type="messages", height=280, label="对话")
             chat_input = gr.Textbox(
-                placeholder="问我：「哪些门太窄了？」",
+                placeholder="问我：「哪些疏散门宽度不满足要求？」",
                 show_label=False, container=False,
             )
             chat_send = gr.Button("发送", variant="primary", size="sm")
@@ -369,12 +515,12 @@ with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS) as 
     ifc_file.change(
         on_upload_ifc,
         inputs=[ifc_file],
-        outputs=[model_path_state, model_info, pending_state],
+        outputs=[model_path_state, model_info, pending_state, component_cards],
     )
     run_btn.click(
         run_check,
         inputs=[model_path_state, rules_file],
-        outputs=[verdicts_state, summary, r1_results, r2_results, model_3d, pending_state],
+        outputs=[verdicts_state, summary, r1_results, r2_results, model_3d, pending_state, component_cards],
     )
     view_mode.change(
         on_mode_change,
@@ -398,15 +544,20 @@ with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS) as 
     chat_send.click(
         chat_respond,
         inputs=[chat_input, chatbot, verdicts_state, model_path_state, rules_file, pending_state],
-        outputs=[chatbot, model_path_state, verdicts_state, summary, r1_results, r2_results, model_3d, pending_state],
+        outputs=[chatbot, model_path_state, verdicts_state, summary, r1_results, r2_results, model_3d, component_cards, pending_state],
     )
     chat_input.submit(
         chat_respond,
         inputs=[chat_input, chatbot, verdicts_state, model_path_state, rules_file, pending_state],
-        outputs=[chatbot, model_path_state, verdicts_state, summary, r1_results, r2_results, model_3d, pending_state],
+        outputs=[chatbot, model_path_state, verdicts_state, summary, r1_results, r2_results, model_3d, component_cards, pending_state],
     )
 
 if __name__ == "__main__":
+    # 项目根目录的 .env（DEEPSEEK_API_KEY 等）；相对本文件定位，与启动目录无关。
+    # 放在 __main__ 内而非模块顶层：测试导入 app 时不应产生读 .env 的副作用
+    # （否则 .env 里的真实 key 会污染测试进程环境，使「无 key 离线」类测试
+    # 实际去调真实 LLM API 而断言失败）
+    load_dotenv(SRC_DIR.parent / ".env")
     demo.queue()
     # 默认本地模式：share=True 会让前端 JS 从境外 S3 CDN 加载，
     # 网络不通时页面白屏；需要对外分享链接时设环境变量 GRADIO_SHARE=1。

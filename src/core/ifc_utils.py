@@ -11,8 +11,9 @@ Pset（如 Pset_Revit_...）而非标准 Pset（Pset_WallCommon）里，
 一致，但显式展开了完整遍历链路，便于测试与理解。
 """
 
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import ifcopenshell.ifcopenshell_wrapper
 from ifcopenshell.entity_instance import entity_instance
 
 
@@ -96,13 +97,15 @@ def get_pset_value(element, property_name: str):
     return None
 
 
-def _property_value(prop, property_name: str):
-    """从单个 IfcProperty 提取指定属性名的值。
+def _property_value(prop, property_name: Optional[str] = None):
+    """从单个 IfcProperty 提取属性值。
 
+    property_name 给定时仅匹配同名属性（get_pset_value 用）；
+    为 None 时返回任意属性的值（构件卡片全量展示用）。
     仅处理 IfcPropertySingleValue（标量值）与 IfcPropertyEnumeratedValue
     （枚举值，取第一个）；其余属性类型（如复合属性）不予考虑。
     """
-    if getattr(prop, "Name", None) != property_name:
+    if property_name is not None and getattr(prop, "Name", None) != property_name:
         return None
     if prop.is_a("IfcPropertySingleValue"):
         nominal = getattr(prop, "NominalValue", None)
@@ -116,6 +119,113 @@ def _property_value(prop, property_name: str):
             first = values[0]
             return getattr(first, "wrappedValue", first)
     return None
+
+
+# ---------------------------------------------------------------------------
+# 构件卡片数据（UI 中间列「构件卡片列表」，DESIGN 需求）
+# ---------------------------------------------------------------------------
+
+def _format_value(value: Any) -> str:
+    """属性值 → 展示字符串：布尔转「是 / 否」，其余原样转 str。"""
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    return str(value)
+
+
+def _direct_properties(element) -> List[Tuple[str, str]]:
+    """元素直接属性中所有标量可读值（排除实体引用与 GlobalId）。
+
+    直接属性 = IFC schema 声明的非逆向属性（如 IfcDoor 的
+    OverallWidth / OverallHeight / PredefinedType / OperationType...）。
+    值类型为实体引用（OwnerHistory / ObjectPlacement / Representation）
+    或集合（LIST/SET OF ...）的无法友好展示，跳过；枚举值（Ifc*Enum）
+    与基础类型（IfcLabel / IfcText / IfcBoolean / IfcLengthMeasure...）
+    解包 wrappedValue 后展示。GlobalId 由 extract_components 单独携带，
+    不在属性列表里重复出现。
+    """
+    try:
+        schema_name = element.file.wrapped_data.schema
+        decl = ifcopenshell.ifcopenshell_wrapper.schema_by_name(schema_name)
+        # all_attributes 含继承链（IfcRoot.Name 等），attributes 只含类型自身声明
+        attrs = decl.declaration_by_name(element.is_a()).all_attributes()
+    except Exception:
+        return []
+    props = []
+    for attr in attrs:
+        name = attr.name()
+        if name == "GlobalId":
+            continue
+        try:
+            value = getattr(element, name)
+        except Exception:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, entity_instance):
+            wrapped = getattr(value, "wrappedValue", None)
+            if wrapped is None:
+                continue  # 实体引用（IfcOwnerHistory 等对象）
+            value = wrapped
+        if isinstance(value, (str, float, int, bool)):
+            props.append((name, _format_value(value)))
+    return props
+
+
+def _pset_properties(element) -> List[Tuple[str, str]]:
+    """全部属性集的全部属性 → [(属性名（pset名）, 值)]。
+
+    与 get_pset_value 同一遍历链路（IsDefinedBy → IfcRelDefinesByProperties
+    → IfcPropertySet.HasProperties），但返回**所有**属性的键值对，
+    而非按名查找单个属性。键附带属性集名，避免不同 pset 同名冲突
+    （如标准 Pset_WallCommon 与厂商 Pset_Revit_* 都可能有 FireRating）。
+    属性存在但值为空 → 显示「（空）」；非标量/枚举之外的属性类型跳过。
+    """
+    props = []
+    for rel in getattr(element, "IsDefinedBy", None) or []:
+        # IsDefinedBy 中还有 IfcRelDefinesByType 等关系，只关心属性定义
+        if not rel.is_a("IfcRelDefinesByProperties"):
+            continue
+        pset = getattr(rel, "RelatingPropertyDefinition", None)
+        # 跳过 IfcElementQuantity 等非属性集定义（量集不是属性）
+        if pset is None or not pset.is_a("IfcPropertySet"):
+            continue
+        pset_name = getattr(pset, "Name", None) or "属性集"
+        for prop in getattr(pset, "HasProperties", None) or []:
+            prop_name = getattr(prop, "Name", None) or "?"
+            key = f"{prop_name}（{pset_name}）"
+            value = _property_value(prop)
+            if value is None:
+                # 值确实为空（属性存在但无值）→ 展示占位；
+                # 非 SingleValue/EnumeratedValue 的属性类型也归入此处跳过语义
+                if prop.is_a("IfcPropertySingleValue") or prop.is_a("IfcPropertyEnumeratedValue"):
+                    props.append((key, "（空）"))
+                continue
+            props.append((key, _format_value(value)))
+    return props
+
+
+def extract_components(ifc, entity_types: Tuple[str, ...] = ("IfcWall", "IfcDoor")) -> List[Dict[str, Any]]:
+    """提取被检查构件列表（构件卡片数据源）。
+
+    对指定 IFC 类型逐元素收集：GlobalId / 名称 / 具体类型 / 全部可读
+    属性（直接属性 + 属性集，见 _direct_properties / _pset_properties）。
+    按名称排序（无名称按「（未命名）」参与排序），保证卡片顺序稳定。
+
+    :param ifc:          已打开的 ifcopenshell 模型
+    :param entity_types: 被检查的构件类型（默认与 config/rules.json 一致）
+    :return: [{"guid", "name", "ifc_type", "props": [(键, 值), ...]}, ...]
+    """
+    components: List[Dict[str, Any]] = []
+    for entity_type in entity_types:
+        for element in ifc.by_type(entity_type):
+            components.append({
+                "guid": get_element_guid(element),
+                "name": get_element_name(element) or "（未命名）",
+                "ifc_type": get_ifc_type(element),
+                "props": _direct_properties(element) + _pset_properties(element),
+            })
+    components.sort(key=lambda c: c["name"])
+    return components
 
 
 def get_overall_width_mm(door) -> Optional[float]:

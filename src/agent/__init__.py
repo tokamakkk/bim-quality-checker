@@ -2,7 +2,7 @@
 
 两个能力（一个聊天窗口）：
 - Capability A（§6.1）只读问答：基于当前 verdicts 的确定性回答
-  （"哪些门太窄了？"），保证离线演示永远可用。
+  （"哪些疏散门宽度不满足要求？"），保证离线演示永远可用。
 - Capability B（§6.2）引导式修复：直接指令立即执行（"把所有小于900mm的
   门改成1000mm"）；咨询"怎么修？"走确认闭环 —— 建议 → 询问 → 用户确认 →
   工具执行（function calling）→ 自动重检汇报。修复写入**工作副本**
@@ -301,7 +301,7 @@ def _run_tool(name: str, args: dict, model_path: str, work_dir) -> tuple:
 # ---------------------------------------------------------------------------
 
 def _ask_doors_too_narrow(verdicts):
-    """"哪些门太窄了？" → 列出门名 + 宽度。"""
+    """"哪些疏散门宽度不满足要求？" → 列出门名 + 宽度。"""
     fails = [v for v in verdicts if v.check_id == "R2" and v.is_fail]
     if not fails:
         return "当前模型所有门宽度均满足 ≥ 900mm 要求。"
@@ -864,7 +864,7 @@ def chat(message: str, history: list, verdicts: list, model_path: str,
                                        rules, verdicts, work_dir), "pending": None}
     elif _is_confirmation(message):
         return {"reply": "当前没有待执行的修复建议。请先告诉我您想修复什么，"
-                         "例如：「门太窄了，怎么修？」",
+                         "例如：「疏散门宽度不足，如何解决？」",
                 "model_path": None, "verdicts": None, "pending": None}
 
     # 咨询"怎么修"：确定性生成方案（锚点）→ LLM 建议（有 key）或确定性建议
@@ -917,7 +917,7 @@ def chat(message: str, history: list, verdicts: list, model_path: str,
         return {"reply": deterministic, "model_path": None, "verdicts": None}
 
     return {"reply": "我是质量检查助手。可以问我：\n"
-                     "· 「哪些门太窄了？」\n"
-                     "· 「把所有小于 900mm 的门改成 1000mm」（修复后自动重新检查）\n"
+                     "· 「哪些疏散门宽度不满足要求？」\n"
+                     "· 「将所有小于 900mm 的门改成 1000mm」（修复后自动重新检查）\n"
                      "· 「重新运行检查」",
             "model_path": None, "verdicts": None}
