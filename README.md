@@ -31,6 +31,12 @@ pip install -r requirements.txt
 
 ## Usage
 
+LLM key 用项目根目录的 `.env` 文件管理（自动加载）：
+
+```bash
+cp .env.example .env       # 然后填入 DEEPSEEK_API_KEY（Windows: copy .env.example .env）
+```
+
 ```bash
 python src/app.py          # starts the Gradio server on http://127.0.0.1:7860 (fixed port)
 GRADIO_SHARE=1 python src/app.py
@@ -38,6 +44,8 @@ GRADIO_SHARE=1 python src/app.py
                            # Off by default — the share page loads JS from an overseas
                            # CDN and can white-screen on restricted networks.
 ```
+
+`.env` 里的 `DEEPSEEK_API_KEY` 与 shell 环境变量等价（后者优先级更高，便于 CI / 临时覆盖）。不配置 key 时 Agent 静默回退到确定性问答，应用照常运行。
 
 Workflow: upload an `.ifc` file (rules are optional — `config/rules.json` is the default) → click 运行检查 (Run) → findings appear in the right panel and as colors in the 3D viewer → toggle 仅显示违规 to keep only warn/fail elements → ask the chat agent about findings or ask it to fix them → re-check shows updated verdicts → export the single-file HTML report.
 
@@ -47,7 +55,7 @@ Sample models live in `sample_data/` (`good_model.ifc` = healthy baseline, `bad_
 
 One chat window, two capabilities:
 
-- **Capability A — Q&A (read-only).** "哪些门太窄了？", "哪些构件没有名字？", "哪些构件缺少防火等级？" — answered from the current verdicts (deterministic offline; DeepSeek LLM when `DEEPSEEK_API_KEY` is set).
+- **Capability A — Q&A (read-only).** "哪些门太窄了？", "哪些构件没有名字？", "哪些构件缺少防火等级？" — answered from the current verdicts (offline deterministic fallback). With `DEEPSEEK_API_KEY` set, every Q&A goes to DeepSeek with the IFC model summary, rules in force, and check results injected as context (DESIGN §6.1); on any API failure it silently falls back to the deterministic answers or the help menu.
 - **Capability B — guided fixes.** Three narrow tools, applied to a **working copy** (the uploaded file is never touched — re-uploading it is the undo mechanism):
   - `set_property` — allowlisted `Name` / `FireRating` ("把空名称的构件都补上名字", "给缺少防火等级的构件补上防火等级")
   - `set_door_width` — clamped to [600, 3000] mm ("把所有小于900mm的门改成1000mm")

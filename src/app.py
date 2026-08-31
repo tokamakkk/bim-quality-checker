@@ -23,7 +23,12 @@ SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from dotenv import load_dotenv
+
 import gradio as gr
+
+# 项目根目录的 .env（DEEPSEEK_API_KEY 等）；相对本文件定位，与启动目录无关
+load_dotenv(SRC_DIR.parent / ".env")
 
 import agent  # DESIGN.md §6：LLM Agent 集成点（问答 + 修复工具）
 from core.engine import load_rules, run_checks

@@ -7,9 +7,10 @@
   修复写入**工作副本**（.work/ 下的新文件），绝不动用户上传的原文件
   （§6.2：原文件可重新上传 = 撤销机制）。
 
-LLM 路径：设置了 DEEPSEEK_API_KEY 时优先调用 DeepSeek（OpenAI 兼容，
-模型 deepseek-v4-flash-vision-exp，§6.3）；未设置或调用失败时回退到
-确定性意图处理 —— 演示视频不依赖任何外部 API（§4.1 风险表）。
+LLM 路径：设置了 DEEPSEEK_API_KEY 时所有问答优先调用 DeepSeek（OpenAI 兼容，
+模型 deepseek-v4-flash-vision-exp，§6.3），每轮自动注入模型信息 / 规则摘要 /
+检查结果上下文（§6.1）；未设置或调用失败时回退到确定性意图处理 —— 演示视频
+不依赖任何外部 API（§4.1 风险表）。
 
 provider.py / tools.py / context.py 由后续任务补齐；本模块是 app.py 的
 薄集成层，保持其接口稳定：agent.chat(...) → dict。
@@ -17,6 +18,7 @@ provider.py / tools.py / context.py 由后续任务补齐；本模块是 app.py 
 
 import os
 import re
+from collections import Counter
 from pathlib import Path
 
 from core.engine import run_checks
@@ -47,7 +49,10 @@ _DEEPSEEK_URL = "https://api.deepseek.com/v1"
 _DEFAULT_MODEL = "deepseek-v4-flash-vision-exp"
 _SYSTEM_PROMPT = (
     "你是 BIM 质量检查助手（HKU AI Agent Technical Test）。"
-    "基于给定的 IFC 模型检查结果回答中文问题，只陈述事实，不编造数据。"
+    "你的全部回答必须以消息下方的【IFC 模型信息】【生效的检查规则】【检查结果】"
+    "为依据：先查阅上下文再回答，只陈述事实，不编造数据；"
+    "列举违规项时不要遗漏任何一条；上下文没有的信息要明确说明"
+    "「检查结果中未包含」，不得猜测。"
 )
 
 
@@ -178,12 +183,17 @@ def _ask_missing_fire_ratings(verdicts):
     return f"当前模型有 {len(warns)} 个构件缺少 FireRating：{names}（数据缺失，无法判定）。"
 
 
-def _summary_line(verdicts):
-    """"重新检查" 后的结果摘要行。"""
+def _check_summary_line(verdicts):
+    """检查汇总行（供上下文块与 _summary_line 共用）。"""
     n_pass = sum(1 for v in verdicts if v.is_pass)
     n_warn = sum(1 for v in verdicts if v.is_warn)
     n_fail = sum(1 for v in verdicts if v.is_fail)
-    return f"重新检查完成：✅ {n_pass} 通过 · ⚠️ {n_warn} 警告 · ❌ {n_fail} 违规。"
+    return f"✅ {n_pass} 通过 · ⚠️ {n_warn} 警告 · ❌ {n_fail} 违规（共 {len(verdicts)} 条判定）"
+
+
+def _summary_line(verdicts):
+    """"重新检查" 后的结果摘要行。"""
+    return "重新检查完成：" + _check_summary_line(verdicts)
 
 
 def _repair_reply(action: str, changed: int, verdicts: list) -> str:
@@ -197,6 +207,126 @@ def _repair_reply(action: str, changed: int, verdicts: list) -> str:
     else:
         hint = "全部通过。"
     return f"已{action} {changed} 个构件（写入工作副本，原文件未动）。{_summary_line(verdicts)}{hint}"
+
+
+# ---------------------------------------------------------------------------
+# LLM 上下文构建（DESIGN §6.1：模型信息 + 规则摘要 + 检查结果）
+# ---------------------------------------------------------------------------
+
+_MODEL_INFO_CACHE: dict = {}   # (路径字符串, mtime) -> 模型摘要；避免每轮问答重读 IFC
+_MODEL_INFO_CACHE_MAX = 64     # 缓存上限（演示规模足够；溢出即整体清空）
+_FINDINGS_MAX_ROWS = 30        # 结果明细截断上限：上下文保持紧凑（§6.1）
+_HISTORY_LIMIT = 6             # 注入 LLM 的最近对话轮数
+
+
+def _model_summary_md(model_path: str) -> str:
+    """模型信息摘要（上下文块之一）：文件名 / IFC 版本 / 构件总数 / 主要类型。
+
+    与 app.py 的 _model_info_md 同源但独立实现（agent 层不依赖 app 层）。
+    每轮问答都会调用 → 用 (路径, mtime) 做小缓存：文件未变不重读 IFC；
+    修复工具写的是新工作副本路径（覆盖同路径 → mtime 变化），缓存自然失效。
+    打开失败返回占位说明而非抛异常 —— 问答仍可基于 verdicts 继续。
+    """
+    if not model_path:
+        return "- 模型：未提供"
+    path = Path(model_path)
+    try:
+        key = (str(path), path.stat().st_mtime)
+    except OSError:
+        return f"- 模型：无法读取（{path.name}）"
+    if key not in _MODEL_INFO_CACHE:
+        try:
+            import ifcopenshell
+            ifc = ifcopenshell.open(str(path))
+            elems = ifc.by_type("IfcElement")
+            counts = Counter(e.is_a() for e in elems)
+            top = "、".join(f"{k} × {v}" for k, v in counts.most_common(5)) or "—"
+            _MODEL_INFO_CACHE[key] = (
+                f"- 文件名：{path.name}\n"
+                f"- IFC 版本：{getattr(ifc, 'schema', '未知')}\n"
+                f"- 构件总数：{len(elems)}\n"
+                f"- 主要类型：{top}"
+            )
+        except Exception as e:
+            _MODEL_INFO_CACHE[key] = f"- 模型：解析失败（{e}）"
+        if len(_MODEL_INFO_CACHE) > _MODEL_INFO_CACHE_MAX:
+            _MODEL_INFO_CACHE.clear()  # 防无界增长：演示场景下极少触发
+    return _MODEL_INFO_CACHE[key]
+
+
+def _rules_summary_md(rules: dict) -> str:
+    """规则配置摘要（上下文块之二）：查了什么实体、按什么标准判定。"""
+    lines = []
+    for rule in (rules or {}).get("validation_rules", []):
+        entities = "、".join(rule.get("entity", [])) or "—"
+        lines.append(f"- {rule.get('name', '规则')}（实体：{entities}）")
+        for check in rule.get("checks", []):
+            cond = check.get("condition", {}) or {}
+            if cond.get("type") == "range":
+                basis = cond.get("threshold_basis", "")
+                detail = (f"，期望 ≥ {cond.get('min')} {cond.get('unit', '')}"
+                          f"（{basis.split()[0] if basis else '配置阈值'}）")
+            elif cond.get("type") == "non_empty":
+                detail = f"，要求 {check.get('attribute', '')} 非空"
+            else:
+                detail = ""
+            lines.append(f"  · {check.get('name', '')}：{check.get('description', '')}{detail}")
+    return "\n".join(lines) or "- 无规则配置"
+
+
+def _findings_report_md(verdicts: list) -> str:
+    """检查结果明细（上下文块之三）：违规/警告逐条列出，按严重级排序。
+
+    pass 行不逐条列（只进汇总数）——LLM 需要的是「哪里有问题」；
+    fail/warn 超过 _FINDINGS_MAX_ROWS 时截断并注明（大型模型上下文仍紧凑）。
+    """
+    verdicts = verdicts or []
+    if not verdicts:
+        return "- 尚未运行检查（无检查结果）"
+    rank = {"fail": 0, "warn": 1, "pass": 2}
+    rows = sorted(
+        (v for v in verdicts if not v.is_pass),
+        key=lambda v: (rank[v.status.value], v.check_id, v.element_name),
+    )
+    lines = [_check_summary_line(verdicts)]
+    for v in rows[:_FINDINGS_MAX_ROWS]:
+        mark = "FAIL" if v.is_fail else "WARN"
+        guid = (v.element_guid or "")[:12]
+        lines.append(
+            f"[{mark}] {v.check_id} {v.element_name or '（未命名）'}"
+            f"（{v.ifc_type}，GUID {guid}）当前 {v.current_value}，"
+            f"期望 {v.expected} —— {v.reason}"
+        )
+    if len(rows) > _FINDINGS_MAX_ROWS:
+        lines.append(
+            f"……（结果过多，仅列出最严重的 {_FINDINGS_MAX_ROWS} 条，"
+            f"其余 {len(rows) - _FINDINGS_MAX_ROWS} 条从略）"
+        )
+    return "\n".join(lines)
+
+
+def _build_context(model_path: str, rules: dict, verdicts: list) -> str:
+    """组装注入 LLM 的完整上下文块（DESIGN §6.1）。
+
+    顺序即呈现顺序：模型是什么 → 按什么规则查 → 查出什么结果。
+    """
+    return "\n\n".join(
+        (
+            "【IFC 模型信息】\n" + _model_summary_md(model_path),
+            "【生效的检查规则】\n" + _rules_summary_md(rules),
+            "【检查结果】\n" + _findings_report_md(verdicts),
+        )
+    )
+
+
+def _recent_history(history: list) -> list:
+    """取最近 _HISTORY_LIMIT 条对话（防御性过滤：role 限 user/assistant、内容非空）。"""
+    turns = [
+        {"role": h.get("role"), "content": str(h.get("content", ""))}
+        for h in (history or [])
+        if h.get("role") in ("user", "assistant") and str(h.get("content", "")).strip()
+    ]
+    return turns[-_HISTORY_LIMIT:]
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +346,21 @@ def _llm_chat(messages: list) -> str:
         max_tokens=400,
     )
     return resp.choices[0].message.content or ""
+
+
+def _llm_chat_with_context(message: str, history: list, model_path: str,
+                           rules: dict, verdicts: list) -> str:
+    """组装消息列表并调用 DeepSeek（§6.1 上下文注入）。
+
+    消息顺序：system（身份 + 回答纪律 + 上下文块）→ 最近历史 → 当前问题。
+    上下文放 system 而非单独的 user 消息：OpenAI 兼容模型对 system 的遵循
+    优先级最高，且不会把上下文误当成用户提问、不会被后续历史稀释。
+    """
+    context = _build_context(model_path, rules, verdicts)
+    messages = [{"role": "system", "content": f"{_SYSTEM_PROMPT}\n\n{context}"}]
+    messages += _recent_history(history)
+    messages.append({"role": "user", "content": message})
+    return _llm_chat(messages)
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +440,14 @@ def chat(message: str, history: list, verdicts: list, model_path: str,
             return {"reply": f"重新检查失败：{e}", "model_path": None, "verdicts": None}
 
     # ---- Capability A：问答（LLM 优先，失败/未配置回退确定性）----
+    # 护栏：尚未运行检查（verdicts 为空）→ 引导先运行，绝不回答。
+    # 确定性助手在空结果上会误报「所有门宽度均满足」，LLM 也无数据可依。
+    # 注意：修复意图在上一段已先行处理（修复合法地发生在运行检查之前）。
+    if not verdicts:
+        return {"reply": "请先点击「运行检查」，我才能基于检查结果回答模型问题。",
+                "model_path": None, "verdicts": None}
+
+    # 三个已知问题的确定性答案（离线兜底，也是 LLM 失败时的回退答案）
     deterministic = None
     if "防火" in message:
         deterministic = _ask_missing_fire_ratings(verdicts)
@@ -303,14 +456,18 @@ def chat(message: str, history: list, verdicts: list, model_path: str,
         deterministic = _ask_missing_names(verdicts)
     elif any(k in message for k in ("门", "宽", "窄", "哪些")):
         deterministic = _ask_doors_too_narrow(verdicts)
-    if deterministic and os.environ.get("DEEPSEEK_API_KEY"):
+
+    # LLM 优先：配置了 DEEPSEEK_API_KEY 时所有问题都走 LLM（注入模型信息 +
+    # 规则摘要 + 检查结果 + 最近历史），失败（网络/格式/额度/**返回空内容**）
+    # 静默回退 deterministic → 帮助菜单（§4.1：离线演示不依赖任何外部 API）。
+    if os.environ.get("DEEPSEEK_API_KEY"):
         try:
-            return {"reply": _llm_chat([
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": message},
-            ]), "model_path": None, "verdicts": None}
+            reply = _llm_chat_with_context(
+                message, history, model_path, rules, verdicts)
+            if (reply or "").strip():
+                return {"reply": reply, "model_path": None, "verdicts": None}
         except Exception:
-            pass  # 回退确定性回答
+            pass  # 回退确定性回答 / 帮助菜单
     if deterministic:
         return {"reply": deterministic, "model_path": None, "verdicts": None}
 
