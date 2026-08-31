@@ -2,7 +2,7 @@
 
 A web-based micro prototype that performs compliance and soundness checks on architectural IFC models, with a chat agent that can explain findings and apply guided attribute-level fixes.
 
-Part of the **HKU AI Agent Technical Test** — 2 rules, 3 deliverables, deadline 2026-08-31 (HKT). See [doc/DESIGN.md](doc/DESIGN.md) for the full design document. **Status: complete** — full integration verified end-to-end (33/33 tests, HTTP-API smoke incl. the agent repair flow).
+Part of the **HKU AI Agent Technical Test** — 2 rules, 3 deliverables, deadline 2026-08-31 (HKT). See [doc/DESIGN.md](doc/DESIGN.md) for the full design document. **Status: complete** — full integration verified end-to-end (49/49 tests, HTTP-API smoke incl. the agent repair + confirmation flow).
 
 ## The two rules
 
@@ -56,18 +56,22 @@ Sample models live in `sample_data/` (`good_model.ifc` = healthy baseline, `bad_
 One chat window, two capabilities:
 
 - **Capability A — Q&A (read-only).** "哪些门太窄了？", "哪些构件没有名字？", "哪些构件缺少防火等级？" — answered from the current verdicts (offline deterministic fallback). With `DEEPSEEK_API_KEY` set, every Q&A goes to DeepSeek with the IFC model summary, rules in force, and check results injected as context (DESIGN §6.1); on any API failure it silently falls back to the deterministic answers or the help menu.
-- **Capability B — guided fixes.** Three narrow tools, applied to a **working copy** (the uploaded file is never touched — re-uploading it is the undo mechanism):
+- **Capability B — guided fixes.** Three narrow tools, applied to a **working copy** (the uploaded file is never touched — re-uploading it is the undo mechanism), with two entry paths:
+  - **Direct command (immediate).** "把所有小于900mm的门改成1000mm" executes right away (§8.2 acceptance path), then re-checks.
+  - **Advice → confirmation loop.** Ask "门太窄了，怎么修？" → the agent analyzes the findings, proposes a concrete plan, and asks **"需要我帮您修复吗？"** → reply 好的/修复吧 and it executes via **real function calling** (`set_door_width` / `set_property` / `rerun_check` tool calls); if the LLM fails or no key is configured, the same plan executes deterministically offline (demo never depends on an external API). One issue class per round (doors > names > fire rating) — after a fix, ask "还有什么问题？" for the next.
   - `set_property` — allowlisted `Name` / `FireRating` ("把空名称的构件都补上名字", "给缺少防火等级的构件补上防火等级")
   - `set_door_width` — clamped to [600, 3000] mm ("把所有小于900mm的门改成1000mm")
   - `rerun_check` — re-verify after each fix and refresh the UI panels
+  - 拒绝词（不用了/先不管）→ 放弃该方案；重新上传模型或点击运行检查也会清除待确认方案。
 
-Demo flow: ask "哪些门太窄了？" → 3 doors listed → fix them → R2 green → fix the remaining attribute issues → **全部通过, all panels green**, 3D re-colored.
+Demo flow: ask "哪些门太窄了？" → 3 doors listed → "怎么修？" → advice + confirmation → "好的" → fixed → R2 green → fix the remaining attribute issues → **全部通过, all panels green**, 3D re-colored.
 
 ## Tests
 
 ```bash
-pytest tests/ -v            # 33 tests: engine (mock + §8.1 sample acceptance),
-                            # report HTML structure, GLB colors, e2e pipeline + repair flow
+pytest tests/ -v            # 49 tests: engine (mock + §8.1 sample acceptance),
+                            # report HTML structure, GLB colors, e2e pipeline + repair flow,
+                            # agent context injection + confirmation loop
 ```
 
 `tests/test_e2e.py` runs the full pipeline offline (load → check → GLB → HTML report) and the agent repair flow (door width → names → fire ratings → all green, original file byte-identical).

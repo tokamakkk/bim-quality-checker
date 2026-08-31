@@ -230,15 +230,19 @@ Context injected per turn: compact element table (guid, name, type, width, fire 
 
 | Tool | Signature | Guardrail |
 |---|---|---|
-| `set_property` | `(guid, property, value)` | `property` allowlisted to `Name`, `FireRating` |
-| `set_door_width` | `(guid, width_mm)` | clamps to [600, 3000]; only touches `IfcDoor.OverallWidth` |
+| `set_property` | `(guid, property, value)` | `property` allowlisted to `Name`, `FireRating`; nonexistent GUID → error |
+| `set_door_width` | `(guid?, threshold_mm, new_mm)` | `guid` omitted = batch; clamps to [600, 3000]; only touches `IfcDoor.OverallWidth` |
 | `rerun_check` | `()` | re-runs engine, refreshes cards/viewer/report |
 
-**Workflow**: user asks in natural language → LLM extracts intent + args → tool executes on a **working copy** of the file (never the original upload; originals are re-uploadable, which serves as undo) → `rerun_check()` auto-fires → the UI reflects the new verdicts. The demo beat "tell the agent to fix the doors → re-check shows green" is the product's climax and must work end-to-end before anything is polished.
+**Workflow**: two entry paths share one deterministic repair-plan anchor (§6.2a below):
+- **Direct command (immediate).** The user gives a complete instruction ("把所有小于900mm的门改成1000mm") → LLM/regex extracts intent + args → tool executes on a **working copy** of the file (never the original upload; originals are re-uploadable, which serves as undo) → `rerun_check()` auto-fires → the UI reflects the new verdicts. The demo beat "tell the agent to fix the doors → re-check shows green" is the product's climax and must work end-to-end before anything is polished.
+- **Advice → confirmation loop.** The user asks vaguely ("门太窄了，怎么修？") → the code derives a machine-readable plan from the verdicts (one issue class per round, severity order doors > names > fire) → the LLM narrates the plan and asks "需要我帮您修复吗？" → on an explicit yes the LLM emits real `tool_calls` (function calling); on no tool call / API failure / no key it silently falls back to executing the *same* plan deterministically → re-check → report. The pending plan lives in UI state and is cleared on decline, on execution, on re-upload, and on a fresh run-check.
+
+**§6.2a Deterministic plan anchor.** The advice loop never trusts the LLM with the fix parameters. `_build_repair_plan(message, verdicts, rules)` derives the pending plan (action, batch/single target, threshold from `rules.json`, target values) from verdicts alone; the LLM narrates that exact plan (`【拟定修复方案】` block in the prompt), so what it says is what executes — whether the confirmation turn runs via function calling or via the deterministic fallback, the same `_run_tool` guardrails apply to the same arguments. Unknown intent without a fixable class simply yields no plan.
 
 **Hard guardrails** (also documented in README as engineering judgment):
 - No element deletion, no geometry edits, no pset creation — attributes on existing elements only.
-- All edits are attribute-level; a malformed tool call returns an error message the LLM must relay, it does not fail silently.
+- All edits are attribute-level; a malformed tool call (unknown tool, non-allowlisted property, nonexistent GUID) raises a Chinese `ValueError` the LLM must relay, it does not fail silently.
 
 ### 6.3 Provider (locked)
 - **Primary: DeepSeek API** — OpenAI-compatible chat completions (`https://api.deepseek.com`), model **`deepseek-v4-flash-vision-exp`**, API key via `DEEPSEEK_API_KEY` env var.

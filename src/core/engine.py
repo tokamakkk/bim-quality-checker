@@ -30,15 +30,36 @@ def load_rules(rules_path: Union[str, Path]) -> Dict[str, Any]:
 
     - 文件不存在 → FileNotFoundError（带路径提示）
     - JSON 损坏 → ValueError（带路径与解析错误提示）
+    - entity 字段结构无效 → ValueError（中文提示，避免 run_checks 逐字符
+      迭代字符串后抛 "Entity with name 'S' not found" 的难懂错误）
     """
     path = Path(rules_path)
     if not path.exists():
         raise FileNotFoundError(f"规则配置文件不存在: {path}")
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            config = json.load(f)
     except json.JSONDecodeError as e:
         raise ValueError(f"规则配置文件不是合法 JSON: {path}（{e}）") from e
+    _validate_entities(config)
+    return config
+
+
+def _validate_entities(rules_config: Dict[str, Any]) -> None:
+    """轻量结构校验：每条规则的 entity 必须是 IFC 类型名数组。
+
+    若写成字符串（"IfcWall" 或任意文本），run_checks 会对字符串逐字符迭代，
+    抛 "Entity with name 'X' not found in schema"。这里提前拦截并指出
+    是哪条规则、当前值是什么，用户一眼能改。
+    """
+    for rule in rules_config.get("validation_rules", []):
+        for et in rule.get("entity", []):
+            if not isinstance(et, str) or not et.startswith("Ifc"):
+                name = rule.get("name", "?")
+                raise ValueError(
+                    f"规则「{name}」的 entity 字段格式无效：应为 IFC 类型名数组"
+                    f"（如 [\"IfcWall\", \"IfcDoor\"]），当前为 {et!r}"
+                )
 
 
 def _open_model(model_path: Union[str, Path]):

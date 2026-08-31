@@ -153,21 +153,23 @@ def on_upload_ifc(file_obj):
     """上传 IFC：保存工作副本，返回（路径, 模型信息）。"""
     src = _to_path(file_obj)
     if src is None or not src.exists():
-        return None, "请上传 .ifc 模型文件（也可使用 sample_data/ 下的示例）"
+        return None, "请上传 .ifc 模型文件（也可使用 sample_data/ 下的示例）", None
     WORK_DIR.mkdir(exist_ok=True)
     dst = WORK_DIR / f"model_{time.strftime('%H%M%S')}_{src.name}"
     shutil.copy2(src, dst)
-    return str(dst), _model_info_md(str(dst))
+    # 第三个返回值：清除待确认的修复方案（新模型下旧方案无效）
+    return str(dst), _model_info_md(str(dst)), None
 
 
 def run_check(model_path, rules_file, progress=gr.Progress()):
     """点击「运行检查」：规则加载 → 引擎检查 → 着色 GLB → 更新各面板。
 
-    返回：(verdicts, 摘要, R1 列表, R2 列表, GLB 路径)
+    返回：(verdicts, 摘要, R1 列表, R2 列表, GLB 路径, pending)
+    末位 pending 恒为 None：新检查结果后旧待确认方案不再有效。
     """
     if not model_path:
         gr.Warning("请先上传 IFC 模型文件")
-        return [], "", "", "", None
+        return [], "", "", "", None, None
 
     # 规则配置：优先用上传的，否则默认 config/rules.json
     rules_path = _to_path(rules_file)
@@ -195,6 +197,7 @@ def run_check(model_path, rules_file, progress=gr.Progress()):
         _results_html(verdicts, {"R1a", "R1b"}, "R1 属性完整性"),
         _results_html(verdicts, {"R2"}, "R2 门宽度"),
         glb_path,
+        None,
     )
 
 
@@ -238,7 +241,7 @@ def on_export_report(model_path, verdicts, rules_file):
         raise gr.Error(f"报告生成失败：{e}") from e
 
 
-def chat_respond(message, history, verdicts, model_path, rules_file):
+def chat_respond(message, history, verdicts, model_path, rules_file, pending):
     """聊天入口 —— 调用 LLM Agent（DESIGN.md §6）。
 
     Agent 修复/重检模型后会返回新模型路径与新判定，这里同步刷新
@@ -253,11 +256,15 @@ def chat_respond(message, history, verdicts, model_path, rules_file):
     except (FileNotFoundError, ValueError):
         rules = load_rules(DEFAULT_RULES)
 
-    result = agent.chat(message, history, verdicts, model_path, rules, WORK_DIR)
+    result = agent.chat(message, history, verdicts, model_path, rules, WORK_DIR,
+                        pending=pending)
     new_history = list(history or []) + [
         {"role": "user", "content": message},
         {"role": "assistant", "content": result["reply"]},
     ]
+    # pending 契约（agent 模块 docstring）：结果含 "pending" 键 = 新值（None=清除），
+    # 不含 = 保持现值（无关问答不误清待确认方案）
+    new_pending = result["pending"] if "pending" in result else pending
 
     # 修复 / 重检发生了 → 刷新 3D 与右侧面板
     if result.get("verdicts") and result.get("model_path"):
@@ -275,10 +282,11 @@ def chat_respond(message, history, verdicts, model_path, rules_file):
             _results_html(new_verdicts, {"R1a", "R1b"}, "R1 属性完整性"),
             _results_html(new_verdicts, {"R2"}, "R2 门宽度"),
             glb,
+            new_pending,
         )
     # 普通问答：面板保持不变
     return (new_history, model_path, verdicts,
-            gr.update(), gr.update(), gr.update(), gr.update())
+            gr.update(), gr.update(), gr.update(), gr.update(), new_pending)
 
 
 # ---------------------------------------------------------------------------
@@ -286,9 +294,10 @@ def chat_respond(message, history, verdicts, model_path, rules_file):
 # ---------------------------------------------------------------------------
 
 with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS) as demo:
-    # 全局状态：判定结果 / 模型路径
+    # 全局状态：判定结果 / 模型路径 / 待确认修复方案（§6.2 建议→询问→确认闭环）
     verdicts_state = gr.State([])
     model_path_state = gr.State(None)
+    pending_state = gr.State(None)
 
     gr.Markdown(
         "# 🏗️ BIM 质量检查器\n"
@@ -357,11 +366,15 @@ with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS) as 
             chat_send = gr.Button("发送", variant="primary", size="sm")
 
     # ------------------------------------------------ 事件绑定
-    ifc_file.change(on_upload_ifc, inputs=[ifc_file], outputs=[model_path_state, model_info])
+    ifc_file.change(
+        on_upload_ifc,
+        inputs=[ifc_file],
+        outputs=[model_path_state, model_info, pending_state],
+    )
     run_btn.click(
         run_check,
         inputs=[model_path_state, rules_file],
-        outputs=[verdicts_state, summary, r1_results, r2_results, model_3d],
+        outputs=[verdicts_state, summary, r1_results, r2_results, model_3d, pending_state],
     )
     view_mode.change(
         on_mode_change,
@@ -384,13 +397,13 @@ with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS) as 
     )
     chat_send.click(
         chat_respond,
-        inputs=[chat_input, chatbot, verdicts_state, model_path_state, rules_file],
-        outputs=[chatbot, model_path_state, verdicts_state, summary, r1_results, r2_results, model_3d],
+        inputs=[chat_input, chatbot, verdicts_state, model_path_state, rules_file, pending_state],
+        outputs=[chatbot, model_path_state, verdicts_state, summary, r1_results, r2_results, model_3d, pending_state],
     )
     chat_input.submit(
         chat_respond,
-        inputs=[chat_input, chatbot, verdicts_state, model_path_state, rules_file],
-        outputs=[chatbot, model_path_state, verdicts_state, summary, r1_results, r2_results, model_3d],
+        inputs=[chat_input, chatbot, verdicts_state, model_path_state, rules_file, pending_state],
+        outputs=[chatbot, model_path_state, verdicts_state, summary, r1_results, r2_results, model_3d, pending_state],
     )
 
 if __name__ == "__main__":

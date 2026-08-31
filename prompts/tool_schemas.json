@@ -1,0 +1,64 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "set_door_width",
+      "description": "修改一扇或多扇门的总宽度（IfcDoor.OverallWidth）。guid 缺省时按阈值批量修改所有宽度不足的门；提供 guid 时只修改该扇门。宽度会钳制到 [600, 3000] mm。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "guid": {
+            "type": "string",
+            "description": "目标门的 GlobalId（可省略，省略=批量）"
+          },
+          "threshold_mm": {
+            "type": "number",
+            "description": "判定过窄的宽度阈值（毫米），如 900"
+          },
+          "new_mm": {
+            "type": "number",
+            "description": "修改后的目标宽度（毫米），如 1000"
+          }
+        },
+        "required": ["threshold_mm", "new_mm"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "set_property",
+      "description": "修改构件的指定属性。property_name 仅允许 Name（名称）或 FireRating（防火等级）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "guid": {
+            "type": "string",
+            "description": "目标构件的 GlobalId（必填）"
+          },
+          "property_name": {
+            "type": "string",
+            "enum": ["Name", "FireRating"],
+            "description": "要修改的属性名"
+          },
+          "value": {
+            "type": "string",
+            "description": "新的属性值，如 \"外墙-03\" 或 \"2h\""
+          }
+        },
+        "required": ["guid", "property_name", "value"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "rerun_check",
+      "description": "重新运行检查并刷新所有结果面板。修复后必须调用。",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  }
+]

@@ -9,7 +9,7 @@
 	"validation_rules": [
 		{
 			"name": "COBie data check",
-			"entity": "Space",
+			"entity": ["IfcSpace"],
 			"file_format": [".xlsx", ".xls", ".csv"],
 			"classification_system": "uniclass(2015), omniclass",
 			"notify": "BIM-coordinator@gmail.com",
@@ -75,8 +75,8 @@
 			]
 		},
 		{
-			"name": "IFC door data check by LLM",			
-			"entity": "IfcDoorStyle",
+			"name": "IFC door data check by LLM",
+			"entity": ["IfcDoorStyle"],
 			"file_format": [".ifc"],
 			"classification_system": "uniclass(2015), omniclass",
 			"notify": "BIM-modeler@gmail.com",
@@ -95,8 +95,8 @@
 			]
 		},
 		{
-			"name": "IFC space data check",			
-			"entity": "IfcSpace",
+			"name": "IFC space data check",
+			"entity": ["IfcSpace"],
 			"file_format": [".ifc"],
 			"classification_system": "uniclass(2015), omniclass",
 			"notify": "BIM-modeler@gmail.com",
@@ -127,8 +127,8 @@
 			]
 		},
 		{
-			"name": "IFC clash check",			
-			"entity": "IfcBuildingElementProxy",
+			"name": "IFC clash check",
+			"entity": ["IfcBuildingElementProxy"],
 			"file_format": [".ifc"],
 			"classification_system": "uniclass(2015), omniclass",
 			"notify": "BIM-coordinator@gmail.com",
@@ -146,8 +146,8 @@
 			]
 		},
 		{
-			"name": "IFC zone data check",			
-			"entity": "IfcZone",
+			"name": "IFC zone data check",
+			"entity": ["IfcZone"],
 			"file_format": [".ifc"],
 			"notify": "BIM-modeler@gmail.com",
 			"checks": [
@@ -167,8 +167,8 @@
 			]
 	  	},
 		{
-			"name": "IFC system data check",			
-			"entity": "IfcSystem",
+			"name": "IFC system data check",
+			"entity": ["IfcSystem"],
 			"file_format": [".ifc"],
 			"notify": "HVAC-engineer@gmail.com",
 			"checks": [
