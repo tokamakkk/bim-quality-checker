@@ -195,7 +195,7 @@ Reuse is visible in code comments/README, which also demonstrates engineering ju
 
 *All user-facing copy is Chinese; labels above are English placeholders for document readability.*
 
-*Right column is an independent scroll region (`#results-column`, height ≈ `100vh − 150px`, clamped 340–900px): long result lists scroll inside the column instead of growing the page. R1/R2 grouping uses native `<details>` rendered inside one `gr.HTML` — do not switch back to `gr.Accordion`: when the parent column is height-capped, Gradio's accordion compresses its content into an internal 650px scroll area and the verdict rows become invisible (observed in Gradio 5.49, not fixable via CSS — `height:auto !important` has no effect because the constraint is set by the component's own FLIP-measurement JS).*
+*Right column is an independent scroll region (`#results-column`, height ≈ `100vh − 150px`, clamped 340–900px): long result lists scroll inside the column instead of growing the page.*
 
 ### 5.2 Color language (one system, three surfaces)
 

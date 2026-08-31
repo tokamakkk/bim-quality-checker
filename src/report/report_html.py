@@ -16,6 +16,7 @@
   str.format（{ --pass } 会被当作占位符 → KeyError），一律用 @@TOKEN@@ 替换
 """
 
+import html
 import json
 from collections import OrderedDict
 from datetime import datetime
@@ -148,20 +149,25 @@ def _snapshot_check_rows(check: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _row_html(v: Verdict) -> str:
-    """一条判定 → 表格行（背景色 tint + data-* 供排序）。"""
+    """一条判定 → 表格行（背景色 tint + data-* 供排序）。
+
+    构件名/原因/数值来自 IFC 文件（外部输入），须转义（含引号），
+    否则含 < > & 或引号的名称会破坏表格结构与 data-* 属性。
+    """
     label, emoji, color = _STATUS_META[v.status]
     tint = _ROW_TINTS[v.status]
+    esc = html.escape
     return (
         f'<tr data-status="{_SEV_ORDER[v.status]}" '
-        f'data-element_name="{v.element_name}" data-ifc_type="{v.ifc_type}" '
-        f'data-current_value="{v.current_value}" data-expected="{v.expected}" '
-        f'data-reason="{v.reason}" style="background:{tint}">'
+        f'data-element_name="{esc(v.element_name)}" data-ifc_type="{esc(v.ifc_type)}" '
+        f'data-current_value="{esc(v.current_value)}" data-expected="{esc(v.expected)}" '
+        f'data-reason="{esc(v.reason)}" style="background:{tint}">'
         f'<td><span class="tag" style="background:{color}">{emoji} {label}</span></td>'
-        f'<td>{v.element_name}</td>'
-        f'<td>{v.ifc_type}</td>'
-        f'<td>{v.current_value}</td>'
-        f'<td>{v.expected}</td>'
-        f'<td>{v.reason}</td>'
+        f'<td>{esc(v.element_name)}</td>'
+        f'<td>{esc(v.ifc_type)}</td>'
+        f'<td>{esc(v.current_value)}</td>'
+        f'<td>{esc(v.expected)}</td>'
+        f'<td>{esc(v.reason)}</td>'
         f'</tr>'
     )
 

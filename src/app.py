@@ -44,16 +44,19 @@ _STATUS_ORDER = {VerdictStatus.FAIL: 0, VerdictStatus.WARN: 1, VerdictStatus.PAS
 # 浮动聊天面板样式（右下角固定、置顶）
 CSS = """
 #results-column {
-  max-height: calc(100vh - 150px);
+  /* Gradio 的 Row 规则会给子列加 flex-wrap: wrap；当结果超高超过列高时，
+     折叠卡会被横向换列到列外、被 overflow-x:hidden 裁掉（表现为点击卡片消失）。
+     这里强制列内不换行。 */
+  flex-wrap: nowrap;
+  height: calc(100vh - 150px);
   min-height: 340px;
+  max-height: 900px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 8px;
 }
-/* Gradio 组件根块内部 overflow 非 visible（min-height:auto→0），
-   在固定高度 flex 容器里会被 flex-shrink 压扁、内容被裁剪。
-   禁止压缩后内容按自然高度排布，由本列自身滚动（见 §5.1）。 */
-#results-column > div.block {
+/* 结果超高时由列整体滚动（设计意图），卡片不被压缩出内部滚动条 */
+#results-column > * {
   flex-shrink: 0;
 }
 #chat-panel {
@@ -70,109 +73,44 @@ CSS = """
 """
 
 
-# 临时诊断（定位后删除）：把右栏真实 DOM 状态实时显示成文字，便于核对各浏览器差异
-# 注意：Gradio 的 js= 参数会被包成 (<js>)(参数) 求值 —— 必须是函数表达式，且不能有结尾分号
-DIAG_JS = r"""
-() => {
-  var box = document.getElementById('diag-box');
-  if (!box) return;
-  var busy = false;
-  function dump() {
-    if (busy) return;                       // 忙锁：防止写 diag-box 自身触发观察循环
-    busy = true;
-    try {
-      var col = document.getElementById('results-column');
-      if (!col) { box.innerText = 'no-col'; return; }
-      var cs = getComputedStyle(col);
-      var details = col.querySelectorAll('details');
-      var rows = Array.prototype.slice.call(col.querySelectorAll('div[style*="border-left"]'));
-      var colR = col.getBoundingClientRect();
-      function rowInfo(r) {
-        var rr = r.getBoundingClientRect();
-        return { top: Math.round(rr.top), h: Math.round(rr.height),
-                 visible: rr.top < colR.bottom && rr.bottom > colR.top };
-      }
-      var text = JSON.stringify({
-        col: { scrollH: col.scrollHeight, clientH: col.clientHeight, scrollTop: Math.round(col.scrollTop),
-               oy: cs.overflowY, h: cs.height, display: cs.display, flexDir: cs.flexDirection },
-        details: details.length, detailsOpen: Array.prototype.map.call(details, function (d) { return d.open; }),
-        rowsInDom: rows.length,
-        firstRow: rows.length ? rowInfo(rows[0]) : null,
-        lastRow: rows.length ? rowInfo(rows[rows.length - 1]) : null,
-        colRect: { top: Math.round(colR.top), bottom: Math.round(colR.bottom) }
-      });
-      box.innerText = text;
-      setTimeout(function () { busy = false; }, 0);   // 写入后解锁：观察回调先于解锁触发，见 busy 直接跳过
-    } catch (e) { busy = false; }
-  }
-  dump();
-  new MutationObserver(dump).observe(document.getElementById('results-column'),
-                                    { subtree: true, childList: true, characterData: true });
-}
-"""
-
-
 # ---------------------------------------------------------------------------
 # 渲染辅助
 # ---------------------------------------------------------------------------
 
-def _summary_html(verdicts: list, model_name: str = "") -> str:
-    """右栏摘要条：✅ N 通过 | ⚠ N 警告 | ❌ N 违规。
-
-    附带运行完成时间戳与模型名——用于确认「运行检查」确实完成
-    （页面刷新后状态会清空，需重新上传并运行）。
-    """
+def _summary_html(verdicts: list) -> str:
+    """右栏摘要条：✅ N 通过 | ⚠ N 警告 | ❌ N 违规。"""
     n = {s: sum(1 for v in verdicts if v.status is s) for s in VerdictStatus}
-    stamp = ""
-    if verdicts:
-        stamp = (
-            f'<div style="font-size:12px;color:#6b7280;margin-top:2px">'
-            f'✅ 检查完成 {datetime.now():%m-%d %H:%M:%S} · {html.escape(model_name or "未知模型")}</div>'
-        )
     return (
         f'<div style="font-size:15px;line-height:1.9">'
         f'<span style="color:{PASS_HEX}">✅ {n[VerdictStatus.PASS]} 通过</span>'
         f'<span style="margin:0 10px;color:{WARN_HEX}">⚠️ {n[VerdictStatus.WARN]} 警告</span>'
         f'<span style="color:{FAIL_HEX}">❌ {n[VerdictStatus.FAIL]} 违规</span>'
         f'<span style="color:#6b7280;font-size:13px">（共 {len(verdicts)} 条判定）</span>'
-        f'</div>{stamp}'
+        f'</div>'
     )
 
 
-def _results_html(verdicts: list) -> str:
-    """R1/R2 规则结果（按违规→警告→通过排序，每行含状态色标记）。
-
-    分组用原生 <details>（可折叠），不用 gr.Accordion：Gradio 折叠组件在
-    父容器限制高度时会把内容压缩进内部滚动（面板只剩标题），原生元素不受影响。
-    """
+def _results_html(verdicts: list, check_ids: set, title: str) -> str:
+    """规则结果列表（按违规→警告→通过排序，每行含状态色标记）。"""
+    sel = [v for v in verdicts if v.check_id in check_ids]
+    if not sel:
+        return f'<div style="color:#9ca3af">（{title} 暂无结果，请先运行检查）</div>'
+    sel.sort(key=lambda v: (_STATUS_ORDER[v.status], v.element_name))
     color = {VerdictStatus.PASS: PASS_HEX, VerdictStatus.WARN: WARN_HEX, VerdictStatus.FAIL: FAIL_HEX}
-
-    def section(title: str, ids: set) -> str:
-        sel = [v for v in verdicts if v.check_id in ids]
-        if not sel:
-            body = '<div style="color:#9ca3af">暂无结果，请先运行检查</div>'
-        else:
-            sel.sort(key=lambda v: (_STATUS_ORDER[v.status], v.element_name))
-            rows = []
-            for v in sel:
-                rows.append(
-                    f'<div style="padding:5px 8px;border-left:3px solid {color[v.status]};'
-                    f'background:#f9fafb;border-radius:4px;margin:3px 0;font-size:13px">'
-                    f'{_EMOJI[v.status]} <b>{html.escape(v.element_name or "（未命名）")}</b>'
-                    f'<span style="color:#6b7280"> · {html.escape(v.ifc_type)} · {html.escape(v.check_id)}</span><br>'
-                    f'<span style="color:#4b5563">{html.escape(v.reason or "")}</span>'
-                    f'<span style="color:#9ca3af;font-size:12px">（当前 {html.escape(v.current_value or "")}，'
-                    f'期望 {html.escape(v.expected or "")}）</span></div>'
-                )
-            body = "".join(rows)
-        return (
-            f'<details open style="margin:8px 0 2px">'
-            f'<summary style="cursor:pointer;font-weight:600;color:#111827;padding:4px 0">{html.escape(title)}</summary>'
-            f'<div style="margin-top:4px">{body}</div>'
-            f'</details>'
+    rows = []
+    # 构件名/原因/数值来自 IFC 文件（外部输入），须转义，防止 < > & 等字符破坏页面结构
+    esc = html.escape
+    for v in sel:
+        rows.append(
+            f'<div style="padding:5px 8px;border-left:3px solid {color[v.status]};'
+            f'background:#f9fafb;border-radius:4px;margin:3px 0;font-size:13px">'
+            f'{_EMOJI[v.status]} <b>{esc(v.element_name) or "（未命名）"}</b>'
+            f'<span style="color:#6b7280"> · {esc(v.ifc_type)} · {esc(v.check_id)}</span><br>'
+            f'<span style="color:#4b5563">{esc(v.reason)}</span>'
+            f'<span style="color:#9ca3af;font-size:12px">（当前 {esc(v.current_value)}，期望 {esc(v.expected)}）</span>'
+            f'</div>'
         )
-
-    return section("R1 属性完整性（名称 / 防火等级）", {"R1a", "R1b"}) + section("R2 门宽度（≥ 900mm）", {"R2"})
+    return "".join(rows)
 
 
 def _model_info_md(path: str) -> str:
@@ -220,43 +158,37 @@ def on_upload_ifc(file_obj):
 def run_check(model_path, rules_file, progress=gr.Progress()):
     """点击「运行检查」：规则加载 → 引擎检查 → 着色 GLB → 更新各面板。
 
-    返回：(verdicts, 摘要, R1/R2 结果, GLB 路径)
+    返回：(verdicts, 摘要, R1 列表, R2 列表, GLB 路径)
     """
     if not model_path:
         gr.Warning("请先上传 IFC 模型文件")
-        return [], "", "", None
-
-    # 错误直接显示在摘要区（gr.Error 的红色提示易被忽略/一闪而过）
-    def _err_summary(msg: str) -> str:
-        return f'<div style="color:#ef4444;font-size:14px">❌ 检查失败：{html.escape(msg)}</div>'
+        return [], "", "", "", None
 
     # 规则配置：优先用上传的，否则默认 config/rules.json
     rules_path = _to_path(rules_file)
     try:
         rules = load_rules(rules_path) if rules_path else load_rules(DEFAULT_RULES)
     except (FileNotFoundError, ValueError) as e:
-        return [], _err_summary(f"规则配置加载失败：{e}"), "（暂无结果）", None
+        raise gr.Error(f"规则配置加载失败：{e}") from e
 
     progress(0.2, desc="解析 IFC 模型…")
     try:
         verdicts = run_checks(model_path, rules)
     except (FileNotFoundError, ValueError) as e:
-        return [], _err_summary(str(e)), "（暂无结果）", None
+        raise gr.Error(f"检查失败：{e}") from e
 
     progress(0.6, desc="生成着色 3D 模型…")
     try:
         glb_path = export_colored_glb(model_path, verdicts, WORK_DIR / "model_all.glb", mode="all")
     except ValueError as e:
-        return [], _err_summary(f"3D 模型生成失败：{e}"), "（暂无结果）", None
+        raise gr.Error(f"3D 模型生成失败：{e}") from e
 
     progress(1.0, desc="完成")
-    results_html = _results_html(verdicts)
-    # 临时诊断（定位后删除）：记录结果负载大小，确认服务端确实下发
-    sys.stderr.write(f"[diag] run_check 结果负载 {len(results_html)} 字符\n")
     return (
         verdicts,
-        _summary_html(verdicts, Path(model_path).name),
-        results_html,
+        _summary_html(verdicts),
+        _results_html(verdicts, {"R1a", "R1b"}, "R1 属性完整性"),
+        _results_html(verdicts, {"R2"}, "R2 门宽度"),
         glb_path,
     )
 
@@ -335,19 +267,20 @@ def chat_respond(message, history, verdicts, model_path, rules_file):
         return (
             new_history, new_model, new_verdicts,
             _summary_html(new_verdicts),
-            _results_html(new_verdicts),
+            _results_html(new_verdicts, {"R1a", "R1b"}, "R1 属性完整性"),
+            _results_html(new_verdicts, {"R2"}, "R2 门宽度"),
             glb,
         )
     # 普通问答：面板保持不变
     return (new_history, model_path, verdicts,
-            gr.update(), gr.update(), gr.update())
+            gr.update(), gr.update(), gr.update(), gr.update())
 
 
 # ---------------------------------------------------------------------------
 # UI 构建
 # ---------------------------------------------------------------------------
 
-with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS, js=DIAG_JS) as demo:
+with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS) as demo:
     # 全局状态：判定结果 / 模型路径
     verdicts_state = gr.State([])
     model_path_state = gr.State(None)
@@ -396,14 +329,13 @@ with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS, js=
         # ------------------------------------------------ 右栏：检查结果
         with gr.Column(scale=3, min_width=320, elem_id="results-column"):
             summary = gr.HTML("检查结果将在此显示。")
-            # 结果分组用原生 <details>（在 _results_html 里渲染），不用 gr.Accordion：
-            # Gradio 折叠组件会把内容压缩进内部滚动，导致具体判定不显示（见 _results_html 注释）
-            r_results = gr.HTML("（暂无结果）")
+            with gr.Accordion("R1 属性完整性（名称 / 防火等级）", open=True):
+                r1_results = gr.HTML("（暂无结果）")
+            with gr.Accordion("R2 门宽度（≥ 900mm）", open=True):
+                r2_results = gr.HTML("（暂无结果）")
             with gr.Row():
                 export_btn = gr.Button("导出 HTML 报告", variant="secondary")
                 report_file = gr.File(label="报告下载", interactive=False)
-            # 临时诊断盒（定位后删除）：实时显示右栏 DOM 状态
-            gr.HTML('<div id="diag-box" style="font-size:11px;color:#6b7280;white-space:pre-wrap;font-family:monospace">（诊断等待中…）</div>')
 
     # ------------------------------------------------ 右下角浮动 AI 助手
     with gr.Column(elem_id="chat-panel"):
@@ -424,7 +356,7 @@ with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS, js=
     run_btn.click(
         run_check,
         inputs=[model_path_state, rules_file],
-        outputs=[verdicts_state, summary, r_results, model_3d],
+        outputs=[verdicts_state, summary, r1_results, r2_results, model_3d],
     )
     view_mode.change(
         on_mode_change,
@@ -437,16 +369,23 @@ with gr.Blocks(title="BIM 质量检查器", theme=gr.themes.Soft(), css=CSS, js=
         outputs=[report_file],
     )
     # 聊天：接入 LLM Agent（DESIGN.md §6），修复/重检后刷新各面板
-    chat_toggle.click(lambda visible: gr.update(visible=not visible), inputs=[chat_body], outputs=[chat_body])
+    # 「收起 / 展开」：Gradio 5 不接受布局对象（gr.Column）作为事件输入，
+    # 可见性用 gr.State 记录，返回新 gr.Column 实例来切换（gr.update 已弃用）
+    chat_visible_state = gr.State(False)
+    chat_toggle.click(
+        lambda visible: (not visible, gr.Column(visible=not visible)),
+        inputs=[chat_visible_state],
+        outputs=[chat_visible_state, chat_body],
+    )
     chat_send.click(
         chat_respond,
         inputs=[chat_input, chatbot, verdicts_state, model_path_state, rules_file],
-        outputs=[chatbot, model_path_state, verdicts_state, summary, r_results, model_3d],
+        outputs=[chatbot, model_path_state, verdicts_state, summary, r1_results, r2_results, model_3d],
     )
     chat_input.submit(
         chat_respond,
         inputs=[chat_input, chatbot, verdicts_state, model_path_state, rules_file],
-        outputs=[chatbot, model_path_state, verdicts_state, summary, r_results, model_3d],
+        outputs=[chatbot, model_path_state, verdicts_state, summary, r1_results, r2_results, model_3d],
     )
 
 if __name__ == "__main__":
@@ -454,10 +393,4 @@ if __name__ == "__main__":
     # 默认本地模式：share=True 会让前端 JS 从境外 S3 CDN 加载，
     # 网络不通时页面白屏；需要对外分享链接时设环境变量 GRADIO_SHARE=1。
     # 固定端口 7860（见文件头 docstring），避免重复启动时端口漂移。
-    demo.launch(
-        share=os.getenv("GRADIO_SHARE") == "1",
-        server_port=7860,
-        # 工作目录（.work/ 下的 GLB / 报告）可能不在 cwd（如从 src/ 启动），
-        # Gradio 5 只允许返回 cwd / temp / allowed_paths 内的文件
-        allowed_paths=[str(WORK_DIR)],
-    )
+    demo.launch(share=os.getenv("GRADIO_SHARE") == "1", server_port=7860)
